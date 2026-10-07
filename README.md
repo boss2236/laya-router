@@ -11,11 +11,35 @@ Mistype something in the terminal and it opens or runs what you meant:
 
 It hooks bash's `command_not_found_handle`, so it only ever sees lines bash could not run.
 
+## Install
+
+```
+curl -fsSL https://raw.githubusercontent.com/boss2236/laya-router/master/install.sh | bash
+```
+
+Needs bash, systemd (user services), python3 and git; installs [uv](https://docs.astral.sh/uv/) if missing.
+It clones to `~/.local/share/laya-router` (override with `LAYA_HOME=...`), or reuses an existing install's
+checkout. From a checkout: `./install.sh`. Remove: `laya uninstall`.
+
+## Use
+
+```
+laya dashboard        what it fixed, learned and missed; try typos; settings; accuracy check
+laya status           running? memory? model loaded?
+laya try gti psuh     what would happen (nothing is run)
+laya learned          learned fixes          laya forget <typo>
+laya config auto_run=2 meaning=false
+laya update           git pull + reinstall   laya uninstall
+```
+
+The dashboard is also in your app launcher as **Laya Dashboard**. It listens on 127.0.0.1 only, needs the
+random token in its URL for every call, and stops by itself 10 minutes after you close it.
+
 ## How it decides
 
 | Step | What | Why |
 |---|---|---|
-| Spelling | edit distance (OSA) over desktop apps, folders (cwd, ~, Projects, zoxide) and `$PATH` commands; swapped letters rank first | edit distance is near-perfect at spelling; the model isn't |
+| Spelling | edit distance (OSA) over desktop apps (and their initials: `yt`, `vsc`), folders (cwd, ~, Projects, zoxide), `$PATH` commands and bash builtins; swapped letters rank first | edit distance is near-perfect at spelling; the model isn't |
 | Arguments | `gti psuh -f` → fixes the command *and* a misspelled subcommand (git/systemctl/docker/npm/… plus whatever your bash history uses) | |
 | Meaning | "web browser", "text editor": a shortlist of apps whose own description matches, ranked by the [Laya](https://huggingface.co/convaiinnovations/laya) decision model | the model is good at meaning, bad at letters |
 | Learning | every pick / "none of these" goes to `~/.local/state/laya-router/picks.json` | stops asking once it knows |
@@ -32,14 +56,16 @@ When it acts without asking:
 server.py          the router (systemd socket-activated, exits after 15 min idle)
 learn.py           picks.json: read by the server, written by the client
 client/laya-fix    arrow-key menu, run from command_not_found_handle
+client/laya        the `laya` command
+dashboard/         dashboard.py (local web server) + index.html
 shell/laya.bash    the bash hook (+ pay-respects `f` as fallback)
 systemd/           laya-router.socket / .service
 eval/              cases.tsv + run.py: the accuracy check
 ```
 
 `install.sh` symlinks all of it into place (`~/.local/bin`, `~/.config/bash`, `~/.config/systemd/user`),
-so editing this checkout edits the live setup. After changing `server.py`:
-`systemctl --user restart laya-router.service`.
+so editing this checkout edits the live setup. After changing `server.py`: `laya restart`.
+Settings live in `~/.config/laya-router/config.json`; what it learned and its log in `~/.local/state/laya-router/`.
 
 ## Resources
 

@@ -14,6 +14,7 @@ import json
 import os
 import select
 import shlex
+import shutil
 import socket
 import subprocess
 import sys
@@ -113,7 +114,10 @@ def shown(c):
 def act(c, shell_pid):
     pending = os.path.join(RUNTIME, f"laya-pending.{shell_pid}")
     if c["kind"] == "app":
-        subprocess.Popen(["setsid", "uwsm-app", "--", c["target"]],
+        app = os.path.splitext(c["target"])[0]
+        launch = (["uwsm-app", "--", c["target"]] if shutil.which("uwsm-app")
+                  else ["gtk-launch", app] if shutil.which("gtk-launch") else ["gio", "launch", c["path"]])
+        subprocess.Popen(["setsid", *launch],
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     elif c["kind"] == "folder":
         with open(pending, "w") as f:
@@ -186,6 +190,8 @@ def main():
         return NOT_HANDLED
     reply = ask_router(t, line, cwd)
     if not reply or reply.get("error") or not reply.get("candidates"):
+        if reply is not None:
+            learn.log(line, "missed")  # the dashboard lists these: typos Laya had no answer for
         return NOT_HANDLED
     cands = reply["candidates"]
 
@@ -193,7 +199,7 @@ def main():
         top = cands[0]
         verb = {"app": "opening", "folder": "going to", "command": "running"}[top["kind"]]
         say(t, f"{DIM}{line} →{RESET} {verb} {BOLD}{shown(top)}{RESET}")
-        learn.record(line, top)
+        learn.record(line, top, "auto")
         act(top, shell_pid)
         return 0
 
@@ -206,10 +212,11 @@ def main():
         learn.record(line, None)
         data, key = learn.load(), learn.norm(line)
         rejects = data["rejects"].get(key, 0)
-        quiet = rejects >= learn.GIVE_UP and rejects > sum(data["lines"].get(key, {}).values())
+        quiet = rejects >= learn.config()["give_up"] and rejects > sum(data["lines"].get(key, {}).values())
         say(t, f"{DIM}{line} → " + ("ok, I'll stay quiet for this from now on" if quiet else "nothing") + RESET)
         return 0
     if choice is None:
+        learn.log(line, "cancelled")
         say(t, f"{DIM}{line} → cancelled{RESET}")
         return 0
     say(t, f"{DIM}{line} →{RESET} {BOLD}{shown(choice)}{RESET}")

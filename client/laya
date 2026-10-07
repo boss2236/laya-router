@@ -1,0 +1,188 @@
+#!/usr/bin/python3
+"""laya: manage the Laya typo router.  `laya help` for the commands."""
+import json
+import os
+import shutil
+import socket
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+import learn  # noqa: E402
+
+RUNTIME = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+SOCK = os.path.join(RUNTIME, "laya-router.sock")
+DASH_STATE = Path(RUNTIME) / "laya-dashboard.json"
+DIM, BOLD, CYAN, GREEN, YELLOW, RESET = "\033[2m", "\033[1m", "\033[36m", "\033[32m", "\033[33m", "\033[0m"
+if not sys.stdout.isatty():
+    DIM = BOLD = CYAN = GREEN = YELLOW = RESET = ""
+
+HELP = f"""{BOLD}laya{RESET} — mistype a command, get what you meant.
+
+  {BOLD}laya dashboard{RESET}        open the dashboard in your browser
+  {BOLD}laya status{RESET}           is it running, how much memory, what it has learned
+  {BOLD}laya try{RESET} <typo>       what would happen for <typo> (nothing is run)
+  {BOLD}laya learned{RESET}          list learned fixes
+  {BOLD}laya forget{RESET} <typo>    forget what was learned for <typo>
+  {BOLD}laya config{RESET} [k=v ...] show or change settings ({", ".join(learn.DEFAULTS)})
+  {BOLD}laya eval{RESET}             accuracy check on eval/cases.tsv
+  {BOLD}laya restart{RESET}          restart the router (after editing server.py)
+  {BOLD}laya update{RESET}           git pull + reinstall
+  {BOLD}laya uninstall{RESET}        remove it (keeps the checkout and what it learned)
+
+{DIM}code: {ROOT}{RESET}"""
+
+
+def router(req, timeout=60):
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(timeout)
+    try:
+        s.connect(SOCK)
+        s.sendall((json.dumps(req) + "\n").encode())
+        data = b""
+        while not data.endswith(b"\n"):
+            chunk = s.recv(65536)
+            if not chunk:
+                break
+            data += chunk
+        return json.loads(data)
+    finally:
+        s.close()
+
+
+def systemctl(*args, check=False):
+    return subprocess.run(["systemctl", "--user", *args], capture_output=True, text=True, check=check)
+
+
+def cmd_status(_):
+    sock = systemctl("is-active", "laya-router.socket").stdout.strip()
+    svc = systemctl("is-active", "laya-router.service").stdout.strip()
+    if sock != "active":
+        print(f"{YELLOW}●{RESET} socket is {sock}: typos aren't being caught. Fix: {BOLD}laya restart{RESET}")
+    elif svc == "active":
+        st = router({"cmd": "status"}, timeout=3)
+        model = f"model loaded{DIM} (unloads after {learn.config()['model_idle_min']} idle min){RESET}" \
+            if st["model_loaded"] else "model not loaded"
+        print(f"{GREEN}●{RESET} running · {st['rss_mb']} MB · {model}")
+    else:
+        print(f"{GREEN}●{RESET} ready {DIM}(asleep; wakes on the first typo){RESET}")
+    data = learn.load()
+    print(f"  learned {len(data['lines'])} fixes, {len(data['rejects'])} turned-down lines")
+    print(f"  {DIM}dashboard: laya dashboard · code: {ROOT}{RESET}")
+
+
+def cmd_try(args):
+    if not args:
+        sys.exit("usage: laya try <typo>")
+    line = " ".join(args)
+    r = router({"line": line, "cwd": os.getcwd()})
+    if r.get("error"):
+        sys.exit(r["error"])
+    if not r["candidates"]:
+        print(f"{DIM}{line}:{RESET} no suggestion (bash says command not found)")
+        return
+    print(f"{DIM}{line}:{RESET} " + ("acts without asking" if r["auto"] else f"menu ({r['mode']})"))
+    for i, c in enumerate(r["candidates"]):
+        mark = f"{CYAN}❯{RESET}" if i == 0 else " "
+        print(f"  {mark} {(c.get('run') or c['label']):<40} {DIM}{c['score'] * 100:.0f}%{RESET}")
+
+
+def cmd_learned(_):
+    data = learn.load()
+    lines = sorted(set(data["lines"]) | set(data["rejects"]))
+    if not lines:
+        print("nothing learned yet")
+        return
+    for line in lines:
+        row = data["lines"].get(line, {})
+        best = max(row, key=row.get) if row else None
+        to = best.split(":", 1)[1] if best else "—"
+        print(f"  {line:<24} → {to:<34} {DIM}picked {row.get(best, 0) if best else 0}, "
+              f"rejected {data['rejects'].get(line, 0)}{RESET}")
+
+
+def cmd_forget(args):
+    if not args:
+        sys.exit("usage: laya forget <typo>")
+    learn.forget(" ".join(args))
+    print(f"forgot {' '.join(args)!r}")
+
+
+def cmd_config(args):
+    if args:
+        values = {}
+        for a in args:
+            k, _, v = a.partition("=")
+            if k not in learn.DEFAULTS or not v:
+                sys.exit(f"unknown setting {a!r}; settings: {', '.join(learn.DEFAULTS)}")
+            if isinstance(learn.DEFAULTS[k], bool):
+                v = v.lower() in ("1", "true", "yes", "on")
+            values[k] = v
+        learn.save_config(values)
+    for k, v in learn.config().items():
+        print(f"  {k:<15} {v}{DIM}{'' if v == learn.DEFAULTS[k] else f'  (default {learn.DEFAULTS[k]})'}{RESET}")
+
+
+def cmd_eval(_):
+    os.execv(str(ROOT / ".venv/bin/python"), [str(ROOT / ".venv/bin/python"), str(ROOT / "eval/run.py"), "-v"])
+
+
+def cmd_restart(_):
+    systemctl("restart", "laya-router.socket")
+    systemctl("restart", "laya-router.service")
+    print("restarted")
+
+
+def cmd_dashboard(args):
+    url = None
+    try:
+        st = json.loads(DASH_STATE.read_text())
+        os.kill(st["pid"], 0)
+        url = st["url"]
+    except (OSError, ValueError, KeyError):
+        pass
+    if not url:
+        p = subprocess.Popen([sys.executable, str(ROOT / "dashboard/dashboard.py")], stdout=subprocess.PIPE,
+                             stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL, text=True, start_new_session=True)
+        url = p.stdout.readline().strip()
+        if not url:
+            sys.exit("the dashboard didn't start")
+    print(f"dashboard: {url}")
+    if "--no-open" not in args:
+        opener = shutil.which("xdg-open") or shutil.which("open")
+        if opener:
+            subprocess.Popen([opener, url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+
+
+def cmd_update(_):
+    subprocess.run(["git", "-C", str(ROOT), "pull", "--ff-only"], check=True)
+    os.execv(str(ROOT / "install.sh"), [str(ROOT / "install.sh")])
+
+
+def cmd_uninstall(_):
+    os.execv(str(ROOT / "install.sh"), [str(ROOT / "install.sh"), "--uninstall"])
+
+
+COMMANDS = {"status": cmd_status, "try": cmd_try, "learned": cmd_learned, "forget": cmd_forget,
+            "config": cmd_config, "eval": cmd_eval, "restart": cmd_restart, "dashboard": cmd_dashboard,
+            "update": cmd_update, "uninstall": cmd_uninstall}
+
+
+def main():
+    args = sys.argv[1:]
+    if not args or args[0] in ("help", "-h", "--help"):
+        print(HELP)
+        return
+    fn = COMMANDS.get(args[0])
+    if not fn:
+        sys.exit(f"laya: no command {args[0]!r}. Try: laya help")
+    try:
+        fn(args[1:])
+    except (ConnectionRefusedError, FileNotFoundError):
+        sys.exit("the router isn't reachable. Try: laya restart")
+
+
+if __name__ == "__main__":
+    main()

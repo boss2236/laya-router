@@ -3,7 +3,7 @@
 Runs as a socket-activated systemd user service (laya-router.socket). It answers JSON
 requests over the unix socket and exits after
 IDLE_EXIT seconds without a request. Spelling fixes (most requests) never touch the model: it is
-loaded only for a "meaning" question ("music app") and dropped again after MODEL_IDLE seconds,
+loaded only for a "meaning" question ("music app") and dropped again after a few idle minutes (config: model_idle_min),
 so the process normally sits at ~25 MB instead of ~2.8 GB.
 
 What you pick in the menu is remembered (learn.py, ~/.local/state/laya-router/picks.json):
@@ -33,7 +33,6 @@ from rapidfuzz.distance import OSA
 import learn
 
 IDLE_EXIT = 15 * 60
-MODEL_IDLE = 3 * 60
 HOME = Path.home()
 
 ANY, APPS_FOLDERS = {"app", "folder", "command"}, {"app", "folder"}
@@ -58,6 +57,22 @@ def cached(name, ttl, build):
     value = build()
     _cache[name] = (time.monotonic(), value)
     return value
+
+
+def abbreviations(name):
+    """"YouTube Music" -> {"ytm": "youtube music", "yt": "youtube"}: initials people type for an app."""
+    words = name.replace("-", " ").split()
+    parts = [re.findall(r"[A-Z]?[a-z0-9]+|[A-Z]+(?![a-z])", w) for w in words]
+    out = {}
+    whole = "".join(p[0][0] for p in parts if p).lower()
+    camel = "".join(x[0] for p in parts for x in p).lower()  # "ytm" as well as "ym"
+    for abbr in (whole, camel):
+        if len(abbr) >= 2:
+            out.setdefault(abbr, name.lower())
+    for w, p in zip(words, parts):
+        if len(p) >= 2:  # camel-case word: YouTube, WhatsApp, LibreOffice
+            out.setdefault("".join(x[0] for x in p).lower(), w.lower())
+    return out
 
 
 def desktop_apps():
@@ -96,7 +111,11 @@ def desktop_apps():
             generic = " ".join([e.get("GenericName", ""), e.get("Keywords", ""), e.get("Categories", "")])
             apps.append({
                 "kind": "app", "name": name, "target": f.name,
+                "path": str(f),
                 "generic": set(re.findall(r"[a-z]{3,}", generic.lower())),
+                # every word the app is known by, for the meaning shortlist (web apps have no categories)
+                "words": set(re.findall(r"[a-z]{3,}", f"{name} {generic} {e.get('Comment', '')}".lower())),
+                "abbrevs": abbreviations(name),
                 "label": f"{name} (app)",
                 "desc": f"app {name}" + (f": {extra[:120]}" if extra else ""),
                 "extra": extra.lower(),
@@ -113,6 +132,11 @@ def path_commands():
                     names.add(entry.name)
         except OSError:
             continue
+    try:  # shell builtins too ("exi" -> exit, "hsitory" -> history)
+        out = subprocess.run(["bash", "-c", "compgen -b"], capture_output=True, text=True, timeout=2).stdout
+        names.update(w for w in out.split() if len(w) >= 2 and w.isalpha())
+    except (OSError, subprocess.SubprocessError):
+        pass
     return [{"kind": "command", "name": n, "target": n, "label": f"{n} (command)",
              "desc": f"terminal command {n}", "extra": ""} for n in sorted(names)]
 
@@ -233,6 +257,8 @@ def spelling(head, kinds, cwd, picks):
         names = {n, *(w for w in n.split() if len(w) >= 4)} if c["kind"] == "app" else {n}
         sim = max(OSA.normalized_similarity(q, x) for x in names)
         dist = min(OSA.distance(q, x) for x in names)
+        if c["kind"] == "app" and q in c["abbrevs"]:
+            sim, dist = max(sim, 0.9), 0  # "yt" -> YouTube, "vsc" -> Visual Studio Code
         if sim >= 0.72 or (len(q) <= 4 and dist <= 1 and len(n) >= len(q) - 1):
             if any(sorted(q) == sorted(x) for x in names):
                 sim = min(sim + 0.2, 0.99)  # same letters, swapped: the commonest typo ("sl" is ls, not psl)
@@ -260,15 +286,17 @@ def describes_an_app(words):
 
 def meaning(query):
     """Apps that fit a description ("music app", "web browser"), ranked by Laya."""
+    apps = cached("apps", 60, desktop_apps)
+    expand = cached("abbrevs", 60, lambda: {k: v for a in apps for k, v in a["abbrevs"].items()})
     words = [w for w in query.lower().split() if w not in FILLER]
     if not words or not describes_an_app(words):
         return []
-    q = " ".join(words)
-    apps = cached("apps", 60, desktop_apps)
+    words = " ".join(expand.get(w, w) for w in words).split()  # "yt music" -> "youtube music"
+    q = query = " ".join(words)
     # Shortlist for Laya: fuzzy hit first, then how many of the words the app uses to describe
     # itself ("Text Editor" for Neovim) -- otherwise ties at 100 cut the list arbitrarily.
     ranked = sorted(((fuzz.partial_token_set_ratio(q, (c["name"] + " " + c["extra"]).lower()),
-                      sum(w in c["generic"] or w.rstrip("s") in c["generic"] for w in words), c) for c in apps),
+                      sum(w in c["words"] or w.rstrip("s") in c["words"] for w in words), c) for c in apps),
                     key=lambda t: (-t[0], -t[1]))
     if ranked and ranked[0][1]:  # some app calls itself this: don't let near-misses (Foot) in
         ranked = [t for t in ranked if t[1]]
@@ -290,6 +318,8 @@ def meaning(query):
 
 def slim(c, rest=""):
     out = {k: c[k] for k in ("kind", "name", "target", "label", "score")}
+    if "path" in c:
+        out["path"] = c["path"]
     if c["kind"] == "command":
         out["run"] = (c["target"] + " " + rest).strip()
     return out
@@ -353,7 +383,8 @@ def learned(line, cands, picks):
 def answer(mode, line, cands, picks, auto=False):
     cands, confirmed = learned(line, cands, picks)
     if confirmed:
-        auto = confirmed >= (learn.AUTO_RUN if cands[0]["kind"] == "command" else learn.AUTO_OPEN)
+        cfg = learn.config()
+        auto = confirmed >= (cfg["auto_run"] if cands[0]["kind"] == "command" else cfg["auto_open"])
     return {"mode": mode, "auto": auto, "candidates": cands}
 
 
@@ -361,7 +392,7 @@ def decide(line, cwd):
     picks = learn.load()
     nline = learn.norm(line)
     rejects = picks["rejects"].get(nline, 0)
-    if rejects >= learn.GIVE_UP and rejects > sum(picks["lines"].get(nline, {}).values()):
+    if rejects >= learn.config()["give_up"] and rejects > sum(picks["lines"].get(nline, {}).values()):
         return {"candidates": []}  # you said "none of these" here before: let bash say not found
 
     words = line.split()
@@ -399,7 +430,7 @@ def decide(line, cwd):
         clear = len(cands) == 1 or top["score"] - cands[1]["score"] >= 0.08
         auto = clear and top["score"] >= 0.8 and top["kind"] != "command" and not commands
         return answer("spelling", line, (cands + commands)[:4], picks, auto)
-    if "app" in kinds:
+    if "app" in kinds and learn.config()["meaning"]:
         cands = [slim(c) for c in meaning(phrase)[:3]]
         if cands:
             return answer("meaning", line, (cands + commands[:1])[:4], picks)
@@ -420,11 +451,24 @@ def handle(conn):
             data += chunk
         try:
             req = json.loads(data)
-            reply = decide(req.get("line", ""), req.get("cwd") or str(HOME))
+            if req.get("cmd") == "status":
+                reply = status()
+            else:
+                reply = decide(req.get("line", ""), req.get("cwd") or str(HOME))
         except Exception as e:  # never leave the client hanging
             reply = {"error": repr(e), "candidates": []}
         conn.sendall((json.dumps(reply) + "\n").encode())
         last_request = time.monotonic()
+
+
+STARTED = time.monotonic()
+
+
+def status():
+    mem = open("/proc/self/status").read().split("VmRSS:")[1].split()[0]
+    return {"model_loaded": _router is not None, "rss_mb": int(mem) // 1024,
+            "uptime_s": int(time.monotonic() - STARTED), "idle_s": int(time.monotonic() - last_request),
+            "model_idle_s": int(time.monotonic() - model_used) if _router is not None else None}
 
 
 def idle_watch():
@@ -433,7 +477,7 @@ def idle_watch():
         now = time.monotonic()
         if now - last_request > IDLE_EXIT:
             os._exit(0)  # systemd's socket unit keeps listening and restarts us on demand
-        if _router is not None and now - model_used > MODEL_IDLE:
+        if _router is not None and now - model_used > learn.config()["model_idle_min"] * 60:
             drop_model()
 
 

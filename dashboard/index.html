@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Laya Dashboard</title>
+<style>
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --line: #e3e6eb; --text: #1b1f24; --dim: #687280;
+  --accent: #0e7c86; --accent-soft: #e0f3f4; --good: #1f8a4c; --warn: #b26a00; --bad: #c0392b;
+  --mono: ui-monospace, "JetBrains Mono", "Cascadia Code", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #111418; --panel: #191d22; --line: #2a3038; --text: #e6e9ed; --dim: #8b95a3;
+          --accent: #4fc3cc; --accent-soft: #15333a; --good: #4cc27f; --warn: #e0a040; --bad: #ef6b5b; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text);
+       font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 1080px; margin: 0 auto; padding: 24px 16px 64px; }
+header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 20px; }
+h1 { font-size: 22px; margin: 0; letter-spacing: -.01em; }
+h1 span { color: var(--accent); }
+h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--dim); margin: 0 0 12px; }
+.pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 99px;
+        background: var(--panel); border: 1px solid var(--line); font-size: 12.5px; color: var(--dim); }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); }
+.dot.on { background: var(--good); } .dot.mid { background: var(--warn); }
+.spacer { flex: 1; }
+button { font: inherit; border: 1px solid var(--line); background: var(--panel); color: var(--text);
+         padding: 6px 12px; border-radius: 8px; cursor: pointer; }
+button:hover { border-color: var(--accent); }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.link { border: 0; background: none; color: var(--dim); padding: 2px 6px; }
+button.link:hover { color: var(--bad); }
+.grid { display: grid; gap: 16px; grid-template-columns: repeat(12, 1fr); }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px; min-width: 0; }
+.span-12 { grid-column: span 12; } .span-7 { grid-column: span 7; } .span-5 { grid-column: span 5; }
+@media (max-width: 820px) { .span-7, .span-5 { grid-column: span 12; } }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 12px; }
+.tile { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; }
+.tile b { display: block; font-size: 24px; font-variant-numeric: tabular-nums; }
+.tile span { color: var(--dim); font-size: 12.5px; }
+.try { display: flex; gap: 8px; }
+input[type=text], input[type=number] { font: inherit; padding: 8px 10px; border-radius: 8px;
+  border: 1px solid var(--line); background: var(--bg); color: var(--text); min-width: 0; }
+.try input { flex: 1; font-family: var(--mono); }
+input:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
+.result { margin-top: 12px; }
+.cand { display: flex; gap: 10px; align-items: baseline; padding: 6px 0; border-bottom: 1px dashed var(--line); }
+.cand:last-child { border: 0; }
+.cand .what { font-family: var(--mono); overflow-wrap: anywhere; }
+.kind { font-size: 11px; padding: 1px 7px; border-radius: 99px; background: var(--accent-soft); color: var(--accent);
+        flex: none; }
+.score { margin-left: auto; color: var(--dim); font-variant-numeric: tabular-nums; flex: none; }
+.note { color: var(--dim); font-size: 12.5px; }
+table { width: 100%; border-collapse: collapse; }
+th { text-align: left; font-weight: 500; color: var(--dim); font-size: 12px; padding: 4px 6px; border-bottom: 1px solid var(--line); }
+td { padding: 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
+tr:last-child td { border-bottom: 0; }
+td.mono { font-family: var(--mono); overflow-wrap: anywhere; }
+td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.scroll { max-height: 360px; overflow: auto; }
+.badge { font-size: 11px; padding: 1px 7px; border-radius: 99px; border: 1px solid var(--line); color: var(--dim); white-space: nowrap; }
+.badge.auto { color: var(--good); border-color: var(--good); }
+.badge.picked { color: var(--accent); border-color: var(--accent); }
+.badge.missed, .badge.rejected { color: var(--warn); border-color: var(--warn); }
+.settings { display: grid; gap: 10px; }
+.settings label { display: flex; align-items: center; gap: 10px; }
+.settings label span { flex: 1; }
+.settings input[type=number] { width: 72px; text-align: right; }
+.settings small { display: block; color: var(--dim); font-size: 12px; }
+pre { font-family: var(--mono); font-size: 12px; background: var(--bg); border: 1px solid var(--line);
+      border-radius: 8px; padding: 10px; overflow: auto; max-height: 300px; margin: 10px 0 0; white-space: pre-wrap; }
+.empty { color: var(--dim); padding: 12px 0; }
+.err { color: var(--bad); }
+.toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); background: var(--text); color: var(--bg);
+         padding: 8px 14px; border-radius: 8px; opacity: 0; transition: opacity .2s; pointer-events: none; }
+.toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1><span>laya</span> dashboard</h1>
+    <span class="pill" id="svc"><i class="dot"></i> …</span>
+    <span class="pill" id="model"><i class="dot"></i> model</span>
+    <span class="spacer"></span>
+    <button id="restart" title="Restart the router service (reloads server.py)">Restart service</button>
+  </header>
+
+  <div class="grid">
+    <div class="span-12 tiles" id="tiles"></div>
+
+    <section class="card span-7">
+      <h2>Try a typo</h2>
+      <form class="try" id="tryform">
+        <input type="text" id="tryline" placeholder="e.g. gti psuh, spotfy, music app" autocomplete="off" spellcheck="false">
+        <button class="primary">Ask</button>
+      </form>
+      <div class="result" id="tryresult"><div class="note">Shows what Laya would suggest. Nothing is opened or run.</div></div>
+    </section>
+
+    <section class="card span-5">
+      <h2>Settings</h2>
+      <form class="settings" id="settings"></form>
+    </section>
+
+    <section class="card span-7">
+      <h2>Recent activity</h2>
+      <div class="scroll"><table id="log"></table></div>
+    </section>
+
+    <section class="card span-5">
+      <h2>Typos it had no answer for</h2>
+      <div class="scroll"><table id="missed"></table></div>
+    </section>
+
+    <section class="card span-12">
+      <h2>What it has learned</h2>
+      <div class="scroll"><table id="learned"></table></div>
+    </section>
+
+    <section class="card span-12">
+      <h2>Accuracy check</h2>
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <button id="evalbtn">Run eval/cases.tsv</button>
+        <span class="note" id="evalnote">Scores the router on the test typos with an empty memory. May load the model (a few seconds).</span>
+      </div>
+      <pre id="evalout" hidden></pre>
+    </section>
+  </div>
+</main>
+<div class="toast" id="toast"></div>
+
+<script>
+const TOKEN = location.hash.slice(1);
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+async function api(path, body) {
+  const r = await fetch(path, {
+    method: body === undefined ? "GET" : "POST",
+    headers: {"X-Laya-Token": TOKEN, "Content-Type": "application/json"},
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const data = await r.json();
+  if (!r.ok) throw new Error(data.error || r.status);
+  return data;
+}
+
+function toast(msg) {
+  const t = $("#toast"); t.textContent = msg; t.classList.add("show");
+  clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove("show"), 1800);
+}
+
+function ago(t) {
+  const s = Math.max(0, Date.now() / 1000 - t);
+  if (s < 60) return "just now";
+  if (s < 3600) return Math.floor(s / 60) + " min ago";
+  if (s < 86400) return Math.floor(s / 3600) + " h ago";
+  return Math.floor(s / 86400) + " d ago";
+}
+
+const SETTINGS = {
+  auto_open: ["Open apps / folders without asking after", "picks of the same fix"],
+  auto_run: ["Run commands without asking after", "confirmations of the same fix"],
+  give_up: ['Stay quiet for a line after', '"none of these"'],
+  model_idle_min: ["Unload the model after", "idle minutes (frees ~1.2 GB)"],
+  meaning: ["Understand descriptions", 'like "music app" (uses the Laya model)'],
+};
+let settingsDrawn = false;
+
+function drawSettings(cfg) {
+  if (settingsDrawn) return;
+  settingsDrawn = true;
+  const f = $("#settings");
+  f.innerHTML = Object.entries(SETTINGS).map(([k, [a, b]]) => typeof cfg[k] === "boolean"
+    ? `<label><span>${a}<small>${b}</small></span><input type="checkbox" name="${k}" ${cfg[k] ? "checked" : ""}></label>`
+    : `<label><span>${a}<small>${b}</small></span><input type="number" min="1" max="99" name="${k}" value="${cfg[k]}"></label>`
+  ).join("") + `<div><button class="primary">Save</button></div>`;
+  f.onsubmit = async e => {
+    e.preventDefault();
+    const body = {};
+    for (const el of f.elements) if (el.name) body[el.name] = el.type === "checkbox" ? el.checked : Number(el.value);
+    try { await api("/api/config", body); toast("Saved"); } catch (err) { toast("Couldn't save: " + err.message); }
+  };
+}
+
+function draw(o) {
+  const s = o.service;
+  const running = s.service === "active";
+  $("#svc").innerHTML = `<i class="dot ${running ? "on" : s.socket === "active" ? "mid" : ""}"></i>` +
+    (running ? `running · ${s.rss_mb ?? "?"} MB` : s.socket === "active" ? "asleep · wakes on first typo" : "socket off");
+  $("#model").innerHTML = `<i class="dot ${s.model_loaded ? "on" : ""}"></i>` +
+    (s.model_loaded ? "model loaded" : "model unloaded");
+
+  const log = o.log, count = w => log.filter(r => r.what === w).length;
+  const tiles = [
+    [count("auto") + count("picked"), "typos fixed"],
+    [count("auto"), "fixed without asking"],
+    [o.learned.filter(l => l.picks).length, "fixes learned"],
+    [count("rejected") + count("cancelled"), "suggestions turned down"],
+    [count("missed"), "no answer"],
+  ];
+  $("#tiles").innerHTML = tiles.map(([n, l]) => `<div class="tile"><b>${n}</b><span>${l}</span></div>`).join("");
+
+  $("#log").innerHTML = log.length
+    ? "<tr><th>typed</th><th></th><th>became</th><th>when</th></tr>" + log.slice(0, 80).map(r =>
+        `<tr><td class="mono">${esc(r.line)}</td><td><span class="badge ${r.what}">${r.what}</span></td>` +
+        `<td class="mono">${esc(r.to || "")}</td><td class="note" style="white-space:nowrap">${ago(r.t)}</td></tr>`).join("")
+    : `<tr><td class="empty">Nothing yet. Mistype something in a terminal.</td></tr>`;
+
+  const missed = {};
+  for (const r of log) if (r.what === "missed") missed[r.line] = (missed[r.line] || 0) + 1;
+  const m = Object.entries(missed).sort((a, b) => b[1] - a[1]);
+  $("#missed").innerHTML = m.length
+    ? "<tr><th>typed</th><th class='num'>times</th></tr>" +
+      m.map(([l, n]) => `<tr><td class="mono">${esc(l)}</td><td class="num">${n}</td></tr>`).join("")
+    : `<tr><td class="empty">None. Every typo got a suggestion.</td></tr>`;
+
+  const cfg = o.config;
+  $("#learned").innerHTML = o.learned.length
+    ? "<tr><th>typed</th><th>becomes</th><th class='num'>picked</th><th class='num'>rejected</th><th>status</th><th></th></tr>" +
+      o.learned.map(l => {
+        const net = l.picks - l.rejects;
+        const need = l.kind === "command" ? cfg.auto_run : cfg.auto_open;
+        const st = !l.picks ? (l.rejects >= cfg.give_up ? "stays quiet" : "rejected")
+                 : net >= need ? "automatic" : net > 0 ? `asks · ${need - net} more to go` : "asks";
+        return `<tr><td class="mono">${esc(l.line)}</td><td class="mono">${esc(l.to || "—")}</td>` +
+          `<td class="num">${l.picks}</td><td class="num">${l.rejects}</td><td class="note">${st}</td>` +
+          `<td style="text-align:right"><button class="link" data-forget="${esc(l.line)}">forget</button></td></tr>`;
+      }).join("")
+    : `<tr><td class="empty">Nothing learned yet. Picks you make in the menu show up here.</td></tr>`;
+  drawSettings(cfg);
+}
+
+async function refresh() {
+  try { draw(await api("/api/overview")); }
+  catch (e) { $("#svc").innerHTML = `<i class="dot"></i><span class="err">dashboard stopped: run <code>laya dashboard</code></span>`; }
+}
+
+document.addEventListener("click", async e => {
+  const line = e.target.dataset?.forget;
+  if (line === undefined) return;
+  await api("/api/forget", {line});
+  toast(`Forgot "${line}"`);
+  refresh();
+});
+
+$("#tryform").onsubmit = async e => {
+  e.preventDefault();
+  const line = $("#tryline").value.trim();
+  if (!line) return;
+  const out = $("#tryresult");
+  out.innerHTML = `<div class="note">Thinking… (a description may wake the model: a few seconds)</div>`;
+  try {
+    const r = await api("/api/try", {line});
+    if (r.error) throw new Error(r.error);
+    if (!r.candidates.length) { out.innerHTML = `<div class="note">No suggestion: bash would just say "command not found".</div>`; return; }
+    const how = r.auto ? "Would act <b>without asking</b>:" : (r.mode === "meaning" ? "Would offer a menu (by meaning):" : "Would offer a menu (by spelling):");
+    out.innerHTML = `<div class="note">${how}</div>` + r.candidates.map((c, i) =>
+      `<div class="cand"><span class="kind">${c.kind}</span><span class="what">${i === 0 ? "<b>" : ""}${esc(c.run || c.label)}${i === 0 ? "</b>" : ""}</span>` +
+      `<span class="score">${(c.score * 100).toFixed(0)}%</span></div>`).join("");
+    refresh();
+  } catch (err) { out.innerHTML = `<div class="err">${esc(err.message)}</div>`; }
+};
+
+$("#restart").onclick = async () => {
+  try { await api("/api/restart", {}); toast("Restarted"); setTimeout(refresh, 600); }
+  catch (e) { toast("Restart failed: " + e.message); }
+};
+
+$("#evalbtn").onclick = async () => {
+  const b = $("#evalbtn"), out = $("#evalout");
+  b.disabled = true; $("#evalnote").textContent = "Running…";
+  try {
+    const r = await api("/api/eval", {});
+    out.hidden = false; out.textContent = r.output;
+    $("#evalnote").textContent = (r.output.trim().split("\n").pop() || "") + "  ·  add cases to eval/cases.tsv";
+  } catch (e) { $("#evalnote").textContent = "Failed: " + e.message; }
+  b.disabled = false;
+};
+
+if (!TOKEN) document.body.innerHTML = "<main><h1>Open this through <code>laya dashboard</code></h1></main>";
+else { refresh(); setInterval(refresh, 5000); }
+</script>
+</body>
+</html>
