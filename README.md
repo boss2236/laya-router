@@ -79,3 +79,7 @@ Spelling-only use keeps the service at ~15–25 MB; with the model loaded it's ~
 ```
 
 Runs every line in `eval/cases.tsv` against an empty picks file. Add a line whenever it gets something wrong.
+
+## License
+
+[AGPL-3.0-or-later](LICENSE). The Laya model is downloaded from Hugging Face at install time under its own license.
