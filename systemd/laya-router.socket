@@ -1,0 +1,9 @@
+[Unit]
+Description=Laya typo router socket (starts the model on first use)
+
+[Socket]
+ListenStream=%t/laya-router.sock
+SocketMode=0600
+
+[Install]
+WantedBy=sockets.target

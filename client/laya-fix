@@ -1,0 +1,143 @@
+#!/usr/bin/python3
+"""Called by bash's command_not_found_handle: laya-fix <shell-pid> <cwd> <typed words...>
+
+Asks the Laya router (laya-router.socket) what was meant, then:
+  app    -> launch it      } without asking only for one clear spelling match;
+  folder -> cd into it     } otherwise a short menu (Enter = first choice)
+  command-> ALWAYS asks, then hands the corrected line back to the shell to run
+Exit 0 = handled (including "user said no"), 10 = not handled (bash falls back).
+Work for the parent shell is written to $XDG_RUNTIME_DIR/laya-pending.<shell-pid>.
+"""
+import json
+import os
+import shlex
+import socket
+import subprocess
+import sys
+
+NOT_HANDLED = 10
+
+RUNTIME = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+SOCK = os.path.join(RUNTIME, "laya-router.sock")
+DIM, BOLD, CYAN, RESET = "\033[2m", "\033[1m", "\033[36m", "\033[0m"
+
+
+class Tty:
+    """The terminal, opened twice: Python cannot open a tty "r+" (it is not seekable)."""
+
+    def __init__(self):
+        self.out = open("/dev/tty", "w")
+        self.inp = open("/dev/tty")
+
+    def write(self, s):
+        self.out.write(s)
+
+    def flush(self):
+        self.out.flush()
+
+    def readline(self):
+        return self.inp.readline()
+
+
+def tty():
+    return Tty()
+
+
+def say(t, msg):
+    t.write(f"{CYAN}laya{RESET} {msg}\n")
+    t.flush()
+
+
+def ask_router(t, line, cwd):
+    if not os.path.exists(SOCK):
+        return None
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        s.connect(SOCK)
+        s.sendall((json.dumps({"line": line, "cwd": cwd}) + "\n").encode())
+        s.settimeout(0.7)
+        data = b""
+        warned = False
+        while not data.endswith(b"\n"):
+            try:
+                chunk = s.recv(65536)
+            except socket.timeout:
+                if warned:
+                    return None
+                say(t, f"{DIM}waking up the model (a few seconds, first use only)…{RESET}")
+                warned = True
+                s.settimeout(30)
+                continue
+            if not chunk:
+                break
+            data += chunk
+        return json.loads(data)
+    except (OSError, ValueError) as e:
+        if os.environ.get("LAYA_DEBUG"):
+            say(t, f"router error: {e!r}")
+        return None
+    finally:
+        s.close()
+
+
+def corrected(c, reply):
+    """The text that will run / the thing that will open, for display."""
+    if c["kind"] == "command":
+        return (c["target"] + " " + reply.get("rest", "")).strip()
+    return c["label"]
+
+
+def act(c, reply, shell_pid):
+    pending = os.path.join(RUNTIME, f"laya-pending.{shell_pid}")
+    if c["kind"] == "app":
+        subprocess.Popen(["setsid", "uwsm-app", "--", c["target"]],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    elif c["kind"] == "folder":
+        with open(pending, "w") as f:
+            f.write("cd -- " + shlex.quote(c["target"]))
+    else:
+        with open(pending, "w") as f:
+            f.write(corrected(c, reply))
+
+
+def main():
+    if len(sys.argv) < 4:
+        return NOT_HANDLED
+    shell_pid, cwd, words = sys.argv[1], sys.argv[2], sys.argv[3:]
+    line = " ".join(words)
+    try:
+        t = tty()
+    except OSError:
+        return NOT_HANDLED
+    reply = ask_router(t, line, cwd)
+    if not reply or reply.get("error") or not reply.get("candidates"):
+        return NOT_HANDLED
+    cands = reply["candidates"]
+    top = cands[0]
+
+    if reply.get("auto"):
+        verb = "opening" if top["kind"] == "app" else "going to"
+        say(t, f"{DIM}{line} →{RESET} {verb} {BOLD}{top['label']}{RESET}")
+        act(top, reply, shell_pid)
+        return 0
+
+    alts = cands[1:3]
+    lead = "did you mean" if reply.get("mode") == "spelling" else "open"
+    say(t, f"{lead} {BOLD}{corrected(top, reply)}{RESET}?")
+    for i, c in enumerate(alts, 2):
+        t.write(f"     {DIM}{i}){RESET} {corrected(c, reply)}\n")
+    t.write(f"     {DIM}[Enter = yes" + (", number = other" if alts else "") + f", n = no]{RESET} ")
+    t.flush()
+    answer = t.readline().strip().lower()
+    if answer in ("", "y", "yes"):
+        act(top, reply, shell_pid)
+    elif answer.isdigit() and 2 <= int(answer) < 2 + len(alts):
+        act(alts[int(answer) - 2], reply, shell_pid)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(0)

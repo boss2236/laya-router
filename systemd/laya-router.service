@@ -1,0 +1,9 @@
+[Unit]
+Description=Laya typo router (decision model for mistyped terminal commands)
+Requires=laya-router.socket
+
+[Service]
+Type=simple
+ExecStart=%h/.local/share/laya-router/.venv/bin/python %h/.local/share/laya-router/server.py
+Environment=HF_HUB_OFFLINE=1 TRANSFORMERS_VERBOSITY=error PYTHONWARNINGS=ignore TOKENIZERS_PARALLELISM=false
+Nice=5
