@@ -1,5 +1,5 @@
 # Laya typo router: a mistyped command becomes the app / folder / command you meant.
-# Server: ~/.local/share/laya-router (systemd --user laya-router.socket), client: ~/.local/bin/laya-fix
+# Source: ~/Projects/hobby/laya-router (server.py, client/laya-fix); systemd --user laya-router.socket
 
 # pay-respects: `f` fixes the last failed command (git comit -> git commit, missing sudo, ...).
 # Its own command-not-found handler is kept as the fallback for anything Laya passes on.

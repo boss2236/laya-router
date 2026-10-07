@@ -1,17 +1,25 @@
 """Laya typo router: turns a mistyped terminal line into the app, folder or command meant.
 
-Runs as a socket-activated systemd user service (laya-router.socket). It loads the Laya
-decision model once, answers JSON requests over the unix socket, and exits after
-IDLE_EXIT seconds without a request so the ~2 GB it holds is only used while needed.
+Runs as a socket-activated systemd user service (laya-router.socket). It answers JSON
+requests over the unix socket and exits after
+IDLE_EXIT seconds without a request. Spelling fixes (most requests) never touch the model: it is
+loaded only for a "meaning" question ("music app") and dropped again after MODEL_IDLE seconds,
+so the process normally sits at ~25 MB instead of ~2.8 GB.
+
+What you pick in the menu is remembered (learn.py, ~/.local/state/laya-router/picks.json):
+a fix you have chosen before goes first, and opens / runs without asking once you've confirmed it.
 
 Request:  {"line": "opn spotfy", "cwd": "/home/me"}
-Response: {"mode": "spelling"|"meaning", "auto": bool, "rest": "args kept after a fixed command",
-           "candidates": [{"kind", "name", "target", "label", "score"}, ...]}  best first;
-          no candidates = nothing sensible to suggest.
+Response: {"mode": "spelling"|"meaning", "auto": bool,
+           "candidates": [{"kind", "name", "target", "label", "score", "run"?}, ...]}  best first;
+          "run" (commands only) is the corrected line to execute; no candidates = stay quiet.
 """
 import configparser
+import ctypes
+import gc
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -22,7 +30,10 @@ from pathlib import Path
 from rapidfuzz import fuzz
 from rapidfuzz.distance import OSA
 
+import learn
+
 IDLE_EXIT = 15 * 60
+MODEL_IDLE = 3 * 60
 HOME = Path.home()
 
 ANY, APPS_FOLDERS = {"app", "folder", "command"}, {"app", "folder"}
@@ -82,8 +93,10 @@ def desktop_apps():
                 e.get("GenericName", ""), e.get("Keywords", "").replace(";", " "),
                 e.get("Categories", "").replace(";", " "), e.get("Comment", ""),
             ]))
+            generic = " ".join([e.get("GenericName", ""), e.get("Keywords", ""), e.get("Categories", "")])
             apps.append({
                 "kind": "app", "name": name, "target": f.name,
+                "generic": set(re.findall(r"[a-z]{3,}", generic.lower())),
                 "label": f"{name} (app)",
                 "desc": f"app {name}" + (f": {extra[:120]}" if extra else ""),
                 "extra": extra.lower(),
@@ -141,27 +154,64 @@ def folders(cwd):
 
 KIND_RANK = {"app": 0, "folder": 1, "command": 2}
 # Words that say "an app" without saying which; dropped before matching on meaning.
-FILLER = {"app", "apps", "application", "program", "the", "a", "an", "my", "some", "me", "please"}
+FILLER = {"app", "apps", "application", "program", "tool", "the", "a", "an", "my", "some", "me", "please", "for"}
+# Side-by-side builds of the same app: on a tie, the stable one wins ("crhome" -> Google Chrome).
+PRERELEASE = re.compile(r"\b(unstable|beta|dev|nightly|canary|preview|insiders)\b", re.I)
+# Subcommands worth knowing before your history has taught us ("gti psuh" -> git push).
+SUBCOMMANDS = {
+    "git": "add bisect blame branch checkout cherry-pick clone commit config diff fetch init log merge mv "
+           "pull push rebase remote reset restore revert rm show stash status switch tag worktree",
+    "systemctl": "cat daemon-reload disable edit enable is-active list-units mask restart start status stop unmask",
+    "docker": "build compose exec images inspect logs ps pull push rm rmi run start stop volume network",
+    "npm": "ci init install link list outdated publish run start test uninstall update",
+    "uv": "add init lock pip python remove run sync tool venv",
+    "cargo": "add bench build check clean clippy doc fmt init install new publish run test update",
+    "gh": "api auth browse gist issue pr release repo run workflow",
+    "yay": "", "pacman": "",
+}
 
 
-def history_counts():
-    """How often each command starts a line in ~/.bash_history: breaks ties toward what you use."""
-    counts = {}
+def history():
+    """Your ~/.bash_history as {command: uses} and {command: {subcommand: uses}}."""
+    counts, subs = {}, {}
     try:
         with open(HOME / ".bash_history", errors="ignore") as f:
             for line in f:
-                w = line.split(maxsplit=1)
-                if w:
-                    counts[w[0]] = counts.get(w[0], 0) + 1
+                w = line.split()
+                if not w:
+                    continue
+                counts[w[0]] = counts.get(w[0], 0) + 1
+                if len(w) > 1 and re.fullmatch(r"[a-z][a-z-]+", w[1]):
+                    row = subs.setdefault(w[0], {})
+                    row[w[1]] = row.get(w[1], 0) + 1
     except OSError:
         pass
-    return counts
+    return counts, subs
 
 
-def spelling(head, kinds, cwd):
+def known_subcommands(cmd):
+    _, subs = cached("history", 300, history)
+    mine = {w for w, n in subs.get(cmd, {}).items() if n >= 2}
+    return mine | set(SUBCOMMANDS.get(cmd, "").split())
+
+
+def fix_subcommand(cmd, word):
+    """"psuh" -> "push" for git; None if `word` is fine or nothing is close."""
+    known = known_subcommands(cmd)
+    if not known or word in known or word.startswith("-"):
+        return None
+    best = max(known, key=lambda k: (OSA.normalized_similarity(word, k), -abs(len(k) - len(word))))
+    if OSA.distance(word, best) <= (1 if len(word) <= 4 else 2):
+        return best
+    return None
+
+
+def spelling(head, kinds, cwd, picks):
     """Items whose name is a near-spelling of `head` (letter swaps, drops, extras), best first.
 
     Spelling is letter-distance work, which plain edit distance does reliably and Laya does not.
+    Ties go to what you have picked before, then apps over folders over commands, then the stable
+    build of an app, then the command you type most.
     """
     q = head.lower()
     pool = []
@@ -171,20 +221,26 @@ def spelling(head, kinds, cwd):
         pool += folders(cwd)
     if "command" in kinds:
         pool += cached("cmds", 60, path_commands)
-    used = cached("history", 300, history_counts)
+    used, _ = cached("history", 300, history)
+    targets = picks["targets"]
     scored = []
     for c in pool:
         n = c["name"].lower()
-        if len(n) < 3 or (c["kind"] == "command" and n == q):  # bash found no such command, so not this
+        if c["kind"] == "command" and n == q:  # bash found no such command, so not this
+            continue
+        if len(n) < (2 if c["kind"] == "command" else 3):  # "sl" -> ls, but no 2-letter app/folder noise
             continue
         names = {n, *(w for w in n.split() if len(w) >= 4)} if c["kind"] == "app" else {n}
         sim = max(OSA.normalized_similarity(q, x) for x in names)
         dist = min(OSA.distance(q, x) for x in names)
-        if sim >= 0.72 or (len(q) <= 4 and dist <= 1):
-            scored.append((round(sim, 3), KIND_RANK[c["kind"]], -used.get(c["name"], 0), c))
-    scored.sort(key=lambda t: (-t[0], t[1], t[2]))
+        if sim >= 0.72 or (len(q) <= 4 and dist <= 1 and len(n) >= len(q) - 1):
+            if any(sorted(q) == sorted(x) for x in names):
+                sim = min(sim + 0.2, 0.99)  # same letters, swapped: the commonest typo ("sl" is ls, not psl)
+            scored.append(((round(sim, 3), targets.get(learn.key(c), 0), -KIND_RANK[c["kind"]],
+                            not PRERELEASE.search(c["name"]), used.get(c["name"], 0)), c))
+    scored.sort(key=lambda t: t[0], reverse=True)
     out, seen = [], set()
-    for sim, _, _, c in scored:
+    for (sim, *_), c in scored:
         key = c["target"] if c["kind"] == "folder" else c["name"].lower()  # app "Spotify" beats command "spotify"
         if key in seen:
             continue
@@ -195,41 +251,119 @@ def spelling(head, kinds, cwd):
     return out
 
 
+def describes_an_app(words):
+    """True if some word is how apps describe themselves ("music", "editor", "browser")."""
+    apps = cached("apps", 60, desktop_apps)
+    vocab = cached("vocab", 60, lambda: set().union(*(a["generic"] for a in apps)))
+    return any(w in vocab or w.rstrip("s") in vocab for w in words)
+
+
 def meaning(query):
     """Apps that fit a description ("music app", "web browser"), ranked by Laya."""
     words = [w for w in query.lower().split() if w not in FILLER]
-    if not words:
+    if not words or not describes_an_app(words):
         return []
     q = " ".join(words)
     apps = cached("apps", 60, desktop_apps)
-    ranked = sorted(((fuzz.partial_token_set_ratio(q, (c["name"] + " " + c["extra"]).lower()), c) for c in apps),
-                    key=lambda t: -t[0])
-    cands = [c for s, c in ranked[:6] if s >= 75]
+    # Shortlist for Laya: fuzzy hit first, then how many of the words the app uses to describe
+    # itself ("Text Editor" for Neovim) -- otherwise ties at 100 cut the list arbitrarily.
+    ranked = sorted(((fuzz.partial_token_set_ratio(q, (c["name"] + " " + c["extra"]).lower()),
+                      sum(w in c["generic"] or w.rstrip("s") in c["generic"] for w in words), c) for c in apps),
+                    key=lambda t: (-t[0], -t[1]))
+    if ranked and ranked[0][1]:  # some app calls itself this: don't let near-misses (Foot) in
+        ranked = [t for t in ranked if t[1]]
+    cands = [c for s, _, c in ranked[:8] if s >= 75]
     if not cands:
         return []
     criteria = {c["name"]: f"app {c['name']}: {c['extra'][:80]}" for c in cands}
-    res = router.predict(
+    res = model().predict(
         {"request": query},
         {"target": {"type": "choice", "instructions": "Which app best fits what the user asked for?",
                     "criteria": criteria}},
         model="english",
     )
     probs = res["answers"]["target"].get("probabilities", {})
-    return sorted((c | {"score": float(probs.get(c["name"], 0.0))} for c in cands), key=lambda c: -c["score"])
+    out = sorted((c | {"score": float(probs.get(c["name"], 0.0))} for c in cands), key=lambda c: -c["score"])
+    # Laya is sure about the right few and gives the rest crumbs: only offer real contenders.
+    return [c for c in out if c["score"] >= max(0.05, out[0]["score"] * 0.25)]
 
 
-def slim(c):
-    return {k: c[k] for k in ("kind", "name", "target", "label", "score")}
+def slim(c, rest=""):
+    out = {k: c[k] for k in ("kind", "name", "target", "label", "score")}
+    if c["kind"] == "command":
+        out["run"] = (c["target"] + " " + rest).strip()
+    return out
 
 
 # ---------------------------------------------------------------- model
-from laya import Router  # noqa: E402  (import after the cheap helpers; torch is slow)
+_router, _router_lock, model_used = None, threading.Lock(), 0.0
 
-router = Router(device="cpu")
-router.load("english")
+
+def model():
+    """The Laya router, loaded on first use (a few seconds, ~1.2 GB) and dropped by idle_watch."""
+    global _router, model_used
+    with _router_lock:
+        model_used = time.monotonic()
+        if _router is None:
+            os.environ.setdefault("LAYA_CPU_AMP", "bf16")
+            import torch
+            from laya import Router  # torch import alone is ~1.5 s, so only when needed
+
+            r = Router(device="cpu")
+            r.load("english")
+            # bf16 weights: same rankings on eval/cases.tsv, ~1.2 GB resident instead of ~2 GB.
+            for agent in r._agents.values():
+                agent.model.to(torch.bfloat16)
+            _router = r
+            gc.collect()  # the fp32 copy
+        return _router
+
+
+def drop_model():
+    global _router
+    with _router_lock:
+        if _router is None:
+            return
+        _router.unload()
+        _router = None
+    gc.collect()
+    try:
+        ctypes.CDLL("libc.so.6").malloc_trim(0)  # hand the freed arena back to the system now
+    except OSError:
+        pass
+
+
+# ---------------------------------------------------------------- deciding
+def learned(line, cands, picks):
+    """Put what you picked for this exact line first; returns (cands, times confirmed)."""
+    nline = learn.norm(line)
+    row = picks["lines"].get(nline, {})
+    if not row:
+        return cands, 0
+    best = max(row, key=row.get)
+    confirmed = row[best] - picks["rejects"].get(nline, 0)  # a pick you later kept rejecting was a slip
+    if confirmed <= 0:
+        return cands, 0
+    for i, c in enumerate(cands):
+        if learn.key(c) == best:
+            return [c] + cands[:i] + cands[i + 1:], confirmed
+    return cands, 0
+
+
+def answer(mode, line, cands, picks, auto=False):
+    cands, confirmed = learned(line, cands, picks)
+    if confirmed:
+        auto = confirmed >= (learn.AUTO_RUN if cands[0]["kind"] == "command" else learn.AUTO_OPEN)
+    return {"mode": mode, "auto": auto, "candidates": cands}
 
 
 def decide(line, cwd):
+    picks = learn.load()
+    nline = learn.norm(line)
+    rejects = picks["rejects"].get(nline, 0)
+    if rejects >= learn.GIVE_UP and rejects > sum(picks["lines"].get(nline, {}).values()):
+        return {"candidates": []}  # you said "none of these" here before: let bash say not found
+
     words = line.split()
     verb, kinds = None, {"app", "folder", "command"}
     if len(words) > 1:
@@ -244,25 +378,33 @@ def decide(line, cwd):
     if not words:
         return {"candidates": []}
 
-    # "gti status": a command with arguments -- only the first word is the typo.
+    # "gti status": a command with arguments -- the first word is the typo, maybe the second too.
+    commands = []
     if verb is None and len(words) > 1:
-        cmds = spelling(words[0], {"command"}, cwd)
-        if cmds:
-            return {"mode": "spelling", "rest": " ".join(words[1:]), "auto": False,
-                    "candidates": [slim(c) for c in cmds]}
+        args = words[1:]
+        for c in spelling(words[0], {"command"}, cwd, picks):
+            fixed = fix_subcommand(c["target"], args[0].lower())
+            rest = " ".join([fixed or args[0], *args[1:]])
+            commands.append(slim(c, rest) | {"_sub": bool(fixed) or args[0].lower() in known_subcommands(c["target"])})
+        looks_like_args = any(re.search(r"[-/.=~0-9]", a) for a in args)
+        if commands and (looks_like_args or commands[0]["_sub"] or not describes_an_app(args)):
+            return answer("spelling", line, [{k: v for k, v in c.items() if k != "_sub"} for c in commands], picks)
+        commands = [{k: v for k, v in c.items() if k != "_sub"} for c in commands]
         kinds = {"app", "folder"}  # "web browser", "visual studo code": a phrase, not a command
 
     phrase = " ".join(words)
-    cands = spelling(phrase, kinds, cwd)
+    cands = [slim(c) for c in spelling(phrase, kinds, cwd, picks)]
     if cands:
         top = cands[0]
         clear = len(cands) == 1 or top["score"] - cands[1]["score"] >= 0.08
-        return {"mode": "spelling", "rest": "", "candidates": [slim(c) for c in cands],
-                "auto": clear and top["score"] >= 0.8 and top["kind"] != "command"}
+        auto = clear and top["score"] >= 0.8 and top["kind"] != "command" and not commands
+        return answer("spelling", line, (cands + commands)[:4], picks, auto)
     if "app" in kinds:
-        cands = meaning(phrase)
+        cands = [slim(c) for c in meaning(phrase)[:3]]
         if cands:
-            return {"mode": "meaning", "rest": "", "auto": False, "candidates": [slim(c) for c in cands[:3]]}
+            return answer("meaning", line, (cands + commands[:1])[:4], picks)
+    if commands:
+        return answer("spelling", line, commands, picks)
     return {"candidates": []}
 
 
@@ -288,8 +430,11 @@ def handle(conn):
 def idle_watch():
     while True:
         time.sleep(30)
-        if time.monotonic() - last_request > IDLE_EXIT:
+        now = time.monotonic()
+        if now - last_request > IDLE_EXIT:
             os._exit(0)  # systemd's socket unit keeps listening and restarts us on demand
+        if _router is not None and now - model_used > MODEL_IDLE:
+            drop_model()
 
 
 def main():

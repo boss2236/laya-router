@@ -1,0 +1,33 @@
+# typed line	expected top pick (name, or the corrected line for commands; - = stay quiet)
+spotfy	Spotify
+dowloads	Downloads
+opn spotfy	Spotify
+gti status	git status
+gti psuh	git push
+gti comit -m wip	git commit -m wip
+sytemctl status	systemctl status
+sytemctl --user restart laya-router	systemctl --user restart laya-router
+pacamn -Syu	pacman -Syu
+dcoker ps	docker ps
+nmp install	npm install
+music app	YouTube Music|Spotify
+web browser	Chromium|Google Chrome|Opera GX
+visual studo code	Visual Studio Code
+sgnal	Signal
+crhome	Google Chrome
+cd projcts	Projects
+code editor	Visual Studio Code|Zed|Neovim|Kate
+text editor	Neovim|Zed|Visual Studio Code|Typora
+file manager	HyprFM|Files
+go to downlods	Downloads
+whatsap	WhatsApp Desktop
+image viewer	Image Viewer
+terminal	Alacritty|Foot|Ghostty|Kitty
+sl	ls
+obsdian	Obsidian
+dicsord	Discord
+lutirs	Lutris
+documetns	Documents
+hobyy	hobby
+calculator	Omacalc|Qalculate!
+lauch firefox	-

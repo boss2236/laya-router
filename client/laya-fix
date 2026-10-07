@@ -2,24 +2,34 @@
 """Called by bash's command_not_found_handle: laya-fix <shell-pid> <cwd> <typed words...>
 
 Asks the Laya router (laya-router.socket) what was meant, then:
-  app    -> launch it      } without asking only for one clear spelling match;
-  folder -> cd into it     } otherwise a short menu (Enter = first choice)
-  command-> ALWAYS asks, then hands the corrected line back to the shell to run
+  app    -> launch it      } without asking for one clear spelling match, or a fix you have
+  folder -> cd into it     } confirmed before; otherwise an arrow-key menu
+  command-> asks (until you've confirmed the same fix 3 times), then hands the corrected line
+            back to the shell to run
+Every pick (or "none of these") is remembered in learn.py's picks.json.
 Exit 0 = handled (including "user said no"), 10 = not handled (bash falls back).
 Work for the parent shell is written to $XDG_RUNTIME_DIR/laya-pending.<shell-pid>.
 """
 import json
 import os
+import select
 import shlex
 import socket
 import subprocess
 import sys
+import termios
+import tty
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), ".."))
+import learn  # noqa: E402  (lives in the repo next to server.py; this file is symlinked)
 
 NOT_HANDLED = 10
 
 RUNTIME = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
 SOCK = os.path.join(RUNTIME, "laya-router.sock")
 DIM, BOLD, CYAN, RESET = "\033[2m", "\033[1m", "\033[36m", "\033[0m"
+CLEAR_LINE, HIDE, SHOW = "\033[2K\r", "\033[?25l", "\033[?25h"
+NONE = {"label": "none of these"}
 
 
 class Tty:
@@ -27,7 +37,7 @@ class Tty:
 
     def __init__(self):
         self.out = open("/dev/tty", "w")
-        self.inp = open("/dev/tty")
+        self.fd = os.open("/dev/tty", os.O_RDONLY)
 
     def write(self, s):
         self.out.write(s)
@@ -35,12 +45,27 @@ class Tty:
     def flush(self):
         self.out.flush()
 
-    def readline(self):
-        return self.inp.readline()
-
-
-def tty():
-    return Tty()
+    def key(self):
+        """One keypress: "up", "down", "enter", "esc", or the character typed."""
+        b = os.read(self.fd, 1)
+        if b == b"\x1b":
+            # Exactly one escape sequence: keys pressed quickly arrive in the same read.
+            if not select.select([self.fd], [], [], 0.03)[0]:
+                return "esc"
+            seq = os.read(self.fd, 1)
+            if seq in (b"[", b"O"):
+                while True:
+                    c = os.read(self.fd, 1)
+                    seq += c
+                    if not c or 0x40 <= c[0] <= 0x7E:  # final byte of a CSI / SS3 sequence
+                        break
+            return {b"[A": "up", b"OA": "up", b"[B": "down", b"OB": "down", b"[H": "home", b"OH": "home",
+                    b"[1~": "home", b"[F": "end", b"OF": "end", b"[4~": "end"}.get(seq, "")
+        if b in (b"\r", b"\n"):
+            return "enter"
+        if b == b"\x03":
+            return "esc"  # Ctrl+C: cbreak mode still delivers SIGINT, but just in case
+        return b.decode(errors="ignore")
 
 
 def say(t, msg):
@@ -64,7 +89,7 @@ def ask_router(t, line, cwd):
             except socket.timeout:
                 if warned:
                     return None
-                say(t, f"{DIM}waking up the model (a few seconds, first use only)…{RESET}")
+                say(t, f"{DIM}waking up the model (a few seconds)…{RESET}")
                 warned = True
                 s.settimeout(30)
                 continue
@@ -80,14 +105,12 @@ def ask_router(t, line, cwd):
         s.close()
 
 
-def corrected(c, reply):
-    """The text that will run / the thing that will open, for display."""
-    if c["kind"] == "command":
-        return (c["target"] + " " + reply.get("rest", "")).strip()
-    return c["label"]
+def shown(c):
+    """What a choice reads as: the line that will run, or the thing that will open."""
+    return c.get("run") or c["label"]
 
 
-def act(c, reply, shell_pid):
+def act(c, shell_pid):
     pending = os.path.join(RUNTIME, f"laya-pending.{shell_pid}")
     if c["kind"] == "app":
         subprocess.Popen(["setsid", "uwsm-app", "--", c["target"]],
@@ -97,7 +120,59 @@ def act(c, reply, shell_pid):
             f.write("cd -- " + shlex.quote(c["target"]))
     else:
         with open(pending, "w") as f:
-            f.write(corrected(c, reply))
+            f.write(c["run"])
+
+
+def menu(t, title, items):
+    """Arrow-key picker. ↑/↓ (or j/k, Tab) move, Enter picks, a digit picks that row, Esc/q cancels.
+
+    Returns the chosen item or None. The menu is erased afterwards, leaving one line behind.
+    """
+    sel, n = 0, len(items)
+    old = termios.tcgetattr(t.fd)
+    t.write(HIDE)
+    try:
+        tty.setcbreak(t.fd)
+        first = True
+        while True:
+            if not first:
+                t.write(f"\033[{n + 2}A")  # back to the title line
+            first = False
+            t.write(f"{CLEAR_LINE}{CYAN}laya{RESET} {title}\n")
+            for i, it in enumerate(items):
+                text = it["label"] if it is NONE else shown(it)
+                num = f"{DIM}{i + 1}{RESET}"
+                if i == sel:
+                    t.write(f"{CLEAR_LINE}  {CYAN}❯{RESET} {num} {BOLD}{text}{RESET}\n")
+                else:
+                    t.write(f"{CLEAR_LINE}    {num} {DIM if it is NONE else ''}{text}{RESET}\n")
+            t.write(f"{CLEAR_LINE}    {DIM}↑↓ move · Enter pick · Esc cancel{RESET}\n")
+            t.flush()
+            k = t.key()
+            if k in ("up", "k"):
+                sel = (sel - 1) % n
+            elif k in ("down", "j", "\t"):
+                sel = (sel + 1) % n
+            elif k == "home":
+                sel = 0
+            elif k == "end":
+                sel = n - 1
+            elif k == "enter":
+                break
+            elif k in ("esc", "q", "n"):
+                sel = None
+                break
+            elif k.isdigit() and 1 <= int(k) <= n:
+                sel = int(k) - 1
+                break
+    finally:
+        termios.tcsetattr(t.fd, termios.TCSADRAIN, old)
+        t.write(f"\033[{n + 2}A")
+        for _ in range(n + 2):
+            t.write(f"{CLEAR_LINE}\n")
+        t.write(f"\033[{n + 2}A{SHOW}")
+        t.flush()
+    return None if sel is None else items[sel]
 
 
 def main():
@@ -106,33 +181,40 @@ def main():
     shell_pid, cwd, words = sys.argv[1], sys.argv[2], sys.argv[3:]
     line = " ".join(words)
     try:
-        t = tty()
+        t = Tty()
     except OSError:
         return NOT_HANDLED
     reply = ask_router(t, line, cwd)
     if not reply or reply.get("error") or not reply.get("candidates"):
         return NOT_HANDLED
     cands = reply["candidates"]
-    top = cands[0]
 
     if reply.get("auto"):
-        verb = "opening" if top["kind"] == "app" else "going to"
-        say(t, f"{DIM}{line} →{RESET} {verb} {BOLD}{top['label']}{RESET}")
-        act(top, reply, shell_pid)
+        top = cands[0]
+        verb = {"app": "opening", "folder": "going to", "command": "running"}[top["kind"]]
+        say(t, f"{DIM}{line} →{RESET} {verb} {BOLD}{shown(top)}{RESET}")
+        learn.record(line, top)
+        act(top, shell_pid)
         return 0
 
-    alts = cands[1:3]
-    lead = "did you mean" if reply.get("mode") == "spelling" else "open"
-    say(t, f"{lead} {BOLD}{corrected(top, reply)}{RESET}?")
-    for i, c in enumerate(alts, 2):
-        t.write(f"     {DIM}{i}){RESET} {corrected(c, reply)}\n")
-    t.write(f"     {DIM}[Enter = yes" + (", number = other" if alts else "") + f", n = no]{RESET} ")
-    t.flush()
-    answer = t.readline().strip().lower()
-    if answer in ("", "y", "yes"):
-        act(top, reply, shell_pid)
-    elif answer.isdigit() and 2 <= int(answer) < 2 + len(alts):
-        act(alts[int(answer) - 2], reply, shell_pid)
+    title = ("did you mean" if reply.get("mode") == "spelling" else "open") + f" {DIM}({line}){RESET}"
+    try:
+        choice = menu(t, title, cands + [NONE])
+    except KeyboardInterrupt:
+        choice = None
+    if choice is NONE:
+        learn.record(line, None)
+        data, key = learn.load(), learn.norm(line)
+        rejects = data["rejects"].get(key, 0)
+        quiet = rejects >= learn.GIVE_UP and rejects > sum(data["lines"].get(key, {}).values())
+        say(t, f"{DIM}{line} → " + ("ok, I'll stay quiet for this from now on" if quiet else "nothing") + RESET)
+        return 0
+    if choice is None:
+        say(t, f"{DIM}{line} → cancelled{RESET}")
+        return 0
+    say(t, f"{DIM}{line} →{RESET} {BOLD}{shown(choice)}{RESET}")
+    learn.record(line, choice)
+    act(choice, shell_pid)
     return 0
 
 

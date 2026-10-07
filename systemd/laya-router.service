@@ -4,6 +4,6 @@ Requires=laya-router.socket
 
 [Service]
 Type=simple
-ExecStart=%h/.local/share/laya-router/.venv/bin/python %h/.local/share/laya-router/server.py
+ExecStart=%h/Projects/hobby/laya-router/.venv/bin/python %h/Projects/hobby/laya-router/server.py
 Environment=HF_HUB_OFFLINE=1 TRANSFORMERS_VERBOSITY=error PYTHONWARNINGS=ignore TOKENIZERS_PARALLELISM=false
 Nice=5
