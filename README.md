@@ -1,5 +1,8 @@
 # laya-router
 
+[![check](https://github.com/boss2236/laya-router/actions/workflows/check.yml/badge.svg)](https://github.com/boss2236/laya-router/actions/workflows/check.yml)
+[![License: AGPL v3](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
+
 Mistype something in the terminal and it opens or runs what you meant:
 
 ```
@@ -32,6 +35,8 @@ laya config auto_run=2 meaning=false
 laya update           git pull + reinstall   laya uninstall
 ```
 
+![The Laya dashboard](docs/dashboard.png)
+
 The dashboard is also in your app launcher as **Laya Dashboard**. It listens on 127.0.0.1 only, needs the
 random token in its URL for every call, and stops by itself 10 minutes after you close it.
 
@@ -61,6 +66,7 @@ dashboard/         dashboard.py (local web server) + index.html
 shell/laya.bash    the bash hook (+ pay-respects `f` as fallback)
 systemd/           laya-router.socket / .service
 eval/              cases.tsv + run.py: the accuracy check
+tests/             model-free checks (CI)
 ```
 
 `install.sh` symlinks all of it into place (`~/.local/bin`, `~/.config/bash`, `~/.config/systemd/user`),
@@ -79,6 +85,11 @@ Spelling-only use keeps the service at ~15–25 MB; with the model loaded it's ~
 ```
 
 Runs every line in `eval/cases.tsv` against an empty picks file. Add a line whenever it gets something wrong.
+`python tests/test_basics.py` runs the model-free checks that CI runs on every push.
+
+## Contributing and security
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Found a security problem? Please report it privately: [SECURITY.md](SECURITY.md).
 
 ## License
 

@@ -1,0 +1,16 @@
+name: Bug
+description: Something broke (install, menu, dashboard, service)
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes: {label: What happened, description: Include any error text}
+    validations: {required: true}
+  - type: textarea
+    id: status
+    attributes:
+      label: Output of `laya status` and `journalctl --user -u laya-router -n 30`
+      render: text
+  - type: input
+    id: distro
+    attributes: {label: Distro / desktop, placeholder: Arch + Hyprland}

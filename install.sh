@@ -10,7 +10,7 @@ set -euo pipefail
 
 REPO_URL=${LAYA_REPO:-https://github.com/boss2236/laya-router.git}
 REPO_SLUG=boss2236/laya-router
-B=$'\033[1m' C=$'\033[36m' G=$'\033[32m' Y=$'\033[33m' D=$'\033[2m' R=$'\033[0m'
+B=$'\033[1m' C=$'\033[36m' G=$'\033[32m' Y=$'\033[33m' R=$'\033[0m'
 step() { printf '%s›%s %s\n' "$C" "$R" "$*"; }
 ok() { printf '%s✓%s %s\n' "$G" "$R" "$*"; }
 die() { printf '%s✗ %s%s\n' "$Y" "$*" "$R" >&2; exit 1; }

@@ -1,0 +1,20 @@
+name: Wrong or missing fix
+description: laya-router suggested the wrong thing, or nothing
+labels: [typo-case]
+body:
+  - type: input
+    id: typed
+    attributes: {label: What you typed, placeholder: gti psuh}
+    validations: {required: true}
+  - type: input
+    id: got
+    attributes: {label: What it did, placeholder: "menu: gtf psuh first"}
+  - type: input
+    id: want
+    attributes: {label: What you meant, placeholder: git push}
+    validations: {required: true}
+  - type: textarea
+    id: try
+    attributes:
+      label: Output of `laya try <what you typed>`
+      render: text

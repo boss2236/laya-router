@@ -1,0 +1,22 @@
+name: check
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Syntax
+        run: |
+          bash -n install.sh shell/laya.bash
+          python -m py_compile server.py learn.py client/laya client/laya-fix dashboard/dashboard.py eval/run.py
+      - name: Shellcheck
+        run: shellcheck -S warning install.sh
+      - name: Tests (no model needed)
+        run: |
+          pip install rapidfuzz
+          python tests/test_basics.py
