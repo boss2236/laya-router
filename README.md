@@ -35,10 +35,16 @@ laya config auto_run=2 meaning=false
 laya update           git pull + reinstall   laya uninstall
 ```
 
-![The Laya dashboard](docs/dashboard.png)
+## Dashboard
 
-The dashboard is also in your app launcher as **Laya Dashboard**. It listens on 127.0.0.1 only, needs the
-random token in its URL for every call, and stops by itself 10 minutes after you close it.
+`laya dashboard`, or **Laya Dashboard** in your app launcher: what it fixed, what it learned (with a
+*forget* button per fix), typos it had no answer for, a box to try typos without running anything,
+the settings, and the accuracy check.
+
+<p align="center"><img src="docs/dashboard.png" alt="The Laya dashboard: stats, try a typo, settings, recent activity, missed typos, learned fixes and the accuracy check" width="900"></p>
+
+It listens on 127.0.0.1 only, needs the random token in its URL for every call, and stops by itself
+10 minutes after you close it.
 
 ## How it decides
 
